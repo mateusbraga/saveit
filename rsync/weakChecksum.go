@@ -1,7 +1,6 @@
 package rsync
 
-import (
-)
+import ()
 
 const (
 	// mod is the largest prime that is less than 65536.
@@ -24,7 +23,6 @@ type weakChecksum struct {
 	data           [BlockSize]byte
 	firstByteIndex int
 	n              int
-	addedSoFar int
 }
 
 func (d *weakChecksum) Reset() {
@@ -97,7 +95,7 @@ func (d *weakChecksum) addData(p ...byte) {
 func (d *weakChecksum) rollWeakChecksum(oldByte byte, newByte byte) {
 	s1, s2 := d.digest&0xffff, d.digest>>16
 	s1 += mod + uint32(newByte) - uint32(oldByte)
-	s2 += mod + s1 - ((BlockSize) * uint32(oldByte)) %mod - 1
+	s2 += mod + s1 - ((BlockSize)*uint32(oldByte))%mod - 1
 	s1 %= mod
 	s2 %= mod
 
