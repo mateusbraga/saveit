@@ -1,6 +1,8 @@
 // Package rsync implements the rsync algorithm.
 //
 // rsync is defined in http://rsync.samba.org/tech_report/tech_report.html.
+//
+// To update a file from an old version to a new one using rsync involves creating a Signature of the old version, using it to create a Delta between the versions (Delta(Signature, newData)), and then applying the Delta to the old version (Patch(oldData, Delta)). This workflow allows for the files to be on different nodes, requiring the exchange of the Signature and the Delta between the nodes.
 package rsync
 
 import (
@@ -25,19 +27,19 @@ const (
 
 // RsyncOp describes an operation to build a file being patched/copied.
 type RsyncOp struct {
-	opCode int
-	data   []byte
-	index  int
+	OpCode int
+	Data   []byte
+	Index  int
 }
 
 func (op RsyncOp) String() string {
-	switch op.opCode {
+	switch op.OpCode {
 	case BLOCK:
-		return fmt.Sprintf("BLOCK %v", op.index)
+		return fmt.Sprintf("BLOCK %v", op.Index)
 	case RAW_DATA:
-		return fmt.Sprintf("RAW_DATA %v bytes", len(op.data))
+		return fmt.Sprintf("RAW_DATA %v bytes", len(op.Data))
 	default:
-		return fmt.Sprintf("Invalid opCode %v", op.opCode)
+		return fmt.Sprintf("Invalid OpCode %v", op.OpCode)
 	}
 }
 
@@ -126,14 +128,14 @@ func Delta(oldDataSignature Signature, newData io.Reader) (chan RsyncOp, chan er
 							dataToSend := make([]byte, numberOfBytesNotMatched)
 							copy(dataToSend, buf[0:numberOfBytesNotMatched])
 							newDataRsyncOp := RsyncOp{
-								opCode: RAW_DATA,
-								data:   dataToSend,
+								OpCode: RAW_DATA,
+								Data:   dataToSend,
 							}
 							resultChan <- newDataRsyncOp
 						}
 						newBlockRsyncOp := RsyncOp{
-							opCode: BLOCK,
-							index:  index,
+							OpCode: BLOCK,
+							Index:  index,
 						}
 						resultChan <- newBlockRsyncOp
 
@@ -153,8 +155,8 @@ func Delta(oldDataSignature Signature, newData io.Reader) (chan RsyncOp, chan er
 					// error here is impossible, we just asked dataBeingProcessed.Len()
 					io.ReadFull(dataBeingProcessed, dataToSend)
 					newDataRsyncOp := RsyncOp{
-						opCode: RAW_DATA,
-						data:   dataToSend,
+						OpCode: RAW_DATA,
+						Data:   dataToSend,
 					}
 					resultChan <- newDataRsyncOp
 				}
@@ -180,8 +182,8 @@ func Delta(oldDataSignature Signature, newData io.Reader) (chan RsyncOp, chan er
 			dataToSend := make([]byte, dataBeingProcessed.Len())
 			copy(dataToSend, dataBeingProcessed.Bytes())
 			newDataRsyncOp := RsyncOp{
-				opCode: RAW_DATA,
-				data:   dataToSend,
+				OpCode: RAW_DATA,
+				Data:   dataToSend,
 			}
 			resultChan <- newDataRsyncOp
 		}
@@ -196,9 +198,9 @@ func Patch(oldData io.ReaderAt, opsChan <-chan RsyncOp, errc <-chan error, newDa
 	buf := make([]byte, BlockSize)
 	for op := range opsChan {
 		//log.Println(op)
-		switch op.opCode {
+		switch op.OpCode {
 		case BLOCK:
-			n, err := oldData.ReadAt(buf, int64(op.index*BlockSize))
+			n, err := oldData.ReadAt(buf, int64(op.Index*BlockSize))
 			if err != nil {
 				if err != io.EOF {
 					return err
@@ -209,7 +211,7 @@ func Patch(oldData io.ReaderAt, opsChan <-chan RsyncOp, errc <-chan error, newDa
 				return err
 			}
 		case RAW_DATA:
-			_, err := newData.Write(op.data)
+			_, err := newData.Write(op.Data)
 			if err != nil {
 				return err
 			}
