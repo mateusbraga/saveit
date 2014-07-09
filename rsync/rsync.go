@@ -2,7 +2,7 @@
 //
 // rsync is defined in http://rsync.samba.org/tech_report/tech_report.html.
 //
-// To update a file from an old version to a new one using rsync involves creating a Signature of the old version, using it to create a Delta between the versions (Delta(Signature, newData)), and then applying the Delta to the old version (Patch(oldData, Delta)). This workflow allows for the files to be on different nodes, requiring the exchange of the Signature and the Delta between the nodes.
+// To update a file from an old version to a new one using rsync involves creating a Signature of the old version, using it to create a Delta between the versions (Delta(Signature, newData)), and then applying the Delta to the old version (Patch(oldData, Delta)). This workflow allows for the files to be on different nodes, requiring the exchange of only the Signature and the Delta between the nodes.
 package rsync
 
 import (
