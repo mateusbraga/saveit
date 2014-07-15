@@ -5,6 +5,7 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"math"
 	"testing"
 )
 
@@ -28,6 +29,13 @@ func TestRollWeakChecksum(t *testing.T) {
 
 		}
 	}
+}
+
+func TestOverflow(t *testing.T) {
+    result := uint64(BlockSize) * uint64(math.MaxUint8)
+    if result > uint64(math.MaxUint32){
+        t.Fatal("BlockSize * MaxUint8 can overflow, weakChecksum behavior will be arbitrary")
+    }
 }
 
 func createFakeData(size int) []byte {
