@@ -7,7 +7,7 @@ import (
 	"os"
 )
 
-func CreateSignatureFile(signatureFile string, file string) error {
+func CreateSignatureFile(signatureFile string, file string) (err error) {
 	fp, err := os.Open(file)
 	if err != nil {
 		return err
@@ -24,7 +24,13 @@ func CreateSignatureFile(signatureFile string, file string) error {
 	if err != nil {
 		return err
 	}
-	defer sfp.Close()
+	defer func() {
+        sfp.Close()
+	    if err != nil {
+	        os.Remove(signatureFile)
+	    }
+	}()
+
 	signatureBuffer := bufio.NewWriter(sfp)
 	defer signatureBuffer.Flush()
 
@@ -37,7 +43,7 @@ func CreateSignatureFile(signatureFile string, file string) error {
 	return nil
 }
 
-func CreateDeltaFile(deltaFile string, signatureOldFile string, newFile string) error {
+func CreateDeltaFile(deltaFile string, signatureOldFile string, newFile string) (err error) {
 	sfp, err := os.Open(signatureOldFile)
 	if err != nil {
 		return err
@@ -68,7 +74,12 @@ func CreateDeltaFile(deltaFile string, signatureOldFile string, newFile string) 
 	if err != nil {
 		return err
 	}
-	defer dfp.Close()
+	defer func() {
+        dfp.Close()
+	    if err != nil {
+	        os.Remove(deltaFile)
+	    }
+	}()
 	deltaBuffer := bufio.NewWriter(dfp)
 	defer deltaBuffer.Flush()
 
@@ -107,7 +118,7 @@ func DeltaArrayToChan(ops []rsync.Op) (chan rsync.Op, chan error) {
 	return opc, closedErrChan
 }
 
-func PatchFile(newFile string, oldFile string, deltaFile string) error {
+func PatchFile(newFile string, oldFile string, deltaFile string) (err error) {
 	dfp, err := os.Open(deltaFile)
 	if err != nil {
 		return err
@@ -131,7 +142,12 @@ func PatchFile(newFile string, oldFile string, deltaFile string) error {
 	if err != nil {
 		return err
 	}
-	defer newFp.Close()
+	defer func() {
+        newFp.Close()
+	    if err != nil {
+	        os.Remove(newFile)
+	    }
+	}()
 	newFileBuffer := bufio.NewWriter(newFp)
 	defer newFileBuffer.Flush()
 
