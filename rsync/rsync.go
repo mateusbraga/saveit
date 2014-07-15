@@ -8,36 +8,45 @@ package rsync
 import (
 	"bytes"
 	"crypto/md5"
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
 )
 
 const (
+    // Beware when changing BlockSize. BlockSize * a byte should never overflow an uint32, otherwise weakChecksum will misbehave.
+
+
 	BlockSize = 1024 * 64
 )
 
-// RsyncOp opcodes.
+// Op opcodes.
 const (
 	// Index of matched block found on old file.
 	BLOCK = iota
 	// Raw data
 	RAW_DATA
+	// END_OF_FILE
+	EOF
 )
 
-// RsyncOp describes an operation to build a file being patched/copied.
-type RsyncOp struct {
+// Op describes an operation to build a file being patched/copied.
+type Op struct {
 	OpCode int
 	Data   []byte
 	Index  int
 }
 
-func (op RsyncOp) String() string {
+func (op Op) String() string {
 	switch op.OpCode {
 	case BLOCK:
 		return fmt.Sprintf("BLOCK %v", op.Index)
 	case RAW_DATA:
 		return fmt.Sprintf("RAW_DATA %v bytes", len(op.Data))
+    case EOF:
+		return fmt.Sprintf("EOF sha1=%v", hex.EncodeToString(op.Data))
 	default:
 		return fmt.Sprintf("Invalid OpCode %v", op.OpCode)
 	}
@@ -84,24 +93,24 @@ func NewSignature(data io.Reader) (Signature, error) {
 	return sig, nil
 }
 
-// Delta returns a chan with the operations required to update the old data to be equal the new data. It closes the RsyncOp channel when it's done. If the newData Reader returns an error, the error is sent through the error channel and then the RsyncOp channel is closed.
-func Delta(oldDataSignature Signature, newData io.Reader) (chan RsyncOp, chan error) {
+// Delta returns a chan with the operations required to update the old data to be equal the new data. It closes the rsync.Op channel when it's done. If the newData Reader returns an error, the error is sent through the error channel and then the rsync.Op channel is closed. See Patch.
+func Delta(oldDataSignature Signature, newData io.Reader) (chan Op, chan error) {
 	errc := make(chan error, 1)
-	resultChan := make(chan RsyncOp, 20)
+	resultChan := make(chan Op, 20)
 
 	go func() {
 		defer close(resultChan)
 
 		rollingWeakHash := newWeakChecksum()
+        sha1Writer := sha1.New()
 		dataBeingProcessed := bytes.NewBuffer(make([]byte, 0, BlockSize))
-		multiwriter := io.MultiWriter(dataBeingProcessed, rollingWeakHash)
+		multiwriter := io.MultiWriter(dataBeingProcessed, rollingWeakHash, sha1Writer)
 		aByteSlice := make([]byte, 1)
 		aBlockSizeSlice := make([]byte, BlockSize)
 
 	startMatchSearchLoop:
 		for {
-			//rollingWeakHash and dataBeingProcessed is in Reset() state
-
+			// rollingWeakHash and dataBeingProcessed is in Reset() state at this point. It means it will try to find a block match after reading a BlockSize at once, instead of byte by byte, as later
 			_, err := readFullAndCopyN(multiwriter, newData, aBlockSizeSlice)
 			if err == io.EOF {
 				// could not form a block, leave this big loop and send remaining data
@@ -127,13 +136,13 @@ func Delta(oldDataSignature Signature, newData io.Reader) (chan RsyncOp, chan er
 						if numberOfBytesNotMatched > 0 {
 							dataToSend := make([]byte, numberOfBytesNotMatched)
 							copy(dataToSend, buf[0:numberOfBytesNotMatched])
-							newDataRsyncOp := RsyncOp{
+							newDataRsyncOp := Op{
 								OpCode: RAW_DATA,
 								Data:   dataToSend,
 							}
 							resultChan <- newDataRsyncOp
 						}
-						newBlockRsyncOp := RsyncOp{
+						newBlockRsyncOp := Op{
 							OpCode: BLOCK,
 							Index:  index,
 						}
@@ -154,7 +163,7 @@ func Delta(oldDataSignature Signature, newData io.Reader) (chan RsyncOp, chan er
 					dataToSend := make([]byte, BlockSize)
 					// error here is impossible, we just asked dataBeingProcessed.Len()
 					io.ReadFull(dataBeingProcessed, dataToSend)
-					newDataRsyncOp := RsyncOp{
+					newDataRsyncOp := Op{
 						OpCode: RAW_DATA,
 						Data:   dataToSend,
 					}
@@ -181,23 +190,33 @@ func Delta(oldDataSignature Signature, newData io.Reader) (chan RsyncOp, chan er
 		if dataBeingProcessed.Len() > 0 {
 			dataToSend := make([]byte, dataBeingProcessed.Len())
 			copy(dataToSend, dataBeingProcessed.Bytes())
-			newDataRsyncOp := RsyncOp{
+			newDataRsyncOp := Op{
 				OpCode: RAW_DATA,
 				Data:   dataToSend,
 			}
 			resultChan <- newDataRsyncOp
 		}
+		//send EOF op
+        EOFOp := Op{
+            OpCode: EOF,
+            Data:   sha1Writer.Sum(nil),
+        }
+        resultChan <- EOFOp
+
 		errc <- nil
 	}()
 
 	return resultChan, errc
 }
 
-// Patch applies the operations from opsChan with oldData and writes resulting data to newData. See Delta.
-func Patch(oldData io.ReaderAt, opsChan <-chan RsyncOp, errc <-chan error, newData io.Writer) error {
+// Patch applies the operations from opsChan with oldData and writes resulting data to newData. It also makes sure that the resulting data sha1 hash matches original data sha1 hash, returning an error otherwise. See Delta.
+func Patch(oldData io.ReaderAt, opsChan <-chan Op, errc <-chan error, newData io.Writer) error {
+    sha1Writer := sha1.New()
+    multiwriter := io.MultiWriter(newData, sha1Writer)
+
 	buf := make([]byte, BlockSize)
 	for op := range opsChan {
-		//log.Println(op)
+        //log.Println(op)
 		switch op.OpCode {
 		case BLOCK:
 			n, err := oldData.ReadAt(buf, int64(op.Index*BlockSize))
@@ -206,15 +225,20 @@ func Patch(oldData io.ReaderAt, opsChan <-chan RsyncOp, errc <-chan error, newDa
 					return err
 				}
 			}
-			_, err = newData.Write(buf[:n])
+			_, err = multiwriter.Write(buf[:n])
 			if err != nil {
 				return err
 			}
 		case RAW_DATA:
-			_, err := newData.Write(op.Data)
+			_, err := multiwriter.Write(op.Data)
 			if err != nil {
 				return err
 			}
+		case EOF:
+            h := sha1Writer.Sum(nil)
+            if bytes.Compare(h, op.Data) != 0 {
+                return fmt.Errorf("rsync: hash of data created does not match hash of original data")
+            }
 		}
 	}
 	if err := <-errc; err != nil {
