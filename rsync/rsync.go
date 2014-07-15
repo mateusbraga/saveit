@@ -93,7 +93,7 @@ func NewSignature(data io.Reader) (Signature, error) {
 	return sig, nil
 }
 
-// Delta returns a chan with the operations required to update the old data to be equal the new data. It closes the rsync.Op channel when it's done. If the newData Reader returns an error, the error is sent through the error channel and then the rsync.Op channel is closed. See Patch.
+// Delta returns a chan with the operations required to update the old data to be equal the new data. It closes the rsync.Op channel when it's done. If the newData Reader returns an error, the error is sent through the error channel before the rsync.Op channel is closed. See Patch.
 func Delta(oldDataSignature Signature, newData io.Reader) (chan Op, chan error) {
 	errc := make(chan error, 1)
 	resultChan := make(chan Op, 20)
@@ -209,7 +209,7 @@ func Delta(oldDataSignature Signature, newData io.Reader) (chan Op, chan error) 
 	return resultChan, errc
 }
 
-// Patch applies the operations from opsChan with oldData and writes resulting data to newData. It also makes sure that the resulting data sha1 hash matches original data sha1 hash, returning an error otherwise. See Delta.
+// Patch applies the operations from opsChan with oldData and writes resulting data to newData. It also makes sure that the resulting data sha1 hash matches the original data sha1 hash, returning an error otherwise. In case of error, the newData Writer may have incomplete data. See Delta.
 func Patch(oldData io.ReaderAt, opsChan <-chan Op, errc <-chan error, newData io.Writer) error {
     sha1Writer := sha1.New()
     multiwriter := io.MultiWriter(newData, sha1Writer)
