@@ -92,15 +92,19 @@ func DeltaChanToArray(opc <-chan rsync.Op, errc <-chan error) ([]rsync.Op, error
 	return result, nil
 }
 
-func deltaArrayToChan(ops []rsync.Op) chan rsync.Op {
+func DeltaArrayToChan(ops []rsync.Op) (chan rsync.Op, chan error) {
 	opc := make(chan rsync.Op)
+    closedErrChan := make(chan error)
+    close(closedErrChan)
+
 	go func() {
 	    defer close(opc)
 		for _, op := range ops {
 			opc <- op
 		}
 	}()
-	return opc
+
+	return opc, closedErrChan
 }
 
 func PatchFile(newFile string, oldFile string, deltaFile string) error {
@@ -115,7 +119,7 @@ func PatchFile(newFile string, oldFile string, deltaFile string) error {
 
 	var ops []rsync.Op
 	dec.Decode(&ops)
-    opc := deltaArrayToChan(ops)
+    opc, errc := DeltaArrayToChan(ops)
 
 	oldFp, err := os.Open(oldFile)
 	if err != nil {
@@ -131,9 +135,7 @@ func PatchFile(newFile string, oldFile string, deltaFile string) error {
 	newFileBuffer := bufio.NewWriter(newFp)
 	defer newFileBuffer.Flush()
 
-    closedErrChan := make(chan error)
-    close(closedErrChan)
-	err = rsync.Patch(oldFp, opc, closedErrChan, newFileBuffer)
+	err = rsync.Patch(oldFp, opc, errc, newFileBuffer)
 	if err != nil {
         return err
 	}
