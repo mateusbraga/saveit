@@ -11,15 +11,17 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
+	"hash"
 	"io"
 	"log"
 )
 
 const (
-    // Beware when changing BlockSize. BlockSize * a byte should never overflow an uint32, otherwise weakChecksum will misbehave.
-
+	// Beware when changing BlockSize. BlockSize * a byte should never overflow an uint32, otherwise weakChecksum will misbehave.
 
 	BlockSize = 1024 * 64
+
+	deltaFuncBuffer = 512
 )
 
 // Op opcodes.
@@ -45,7 +47,7 @@ func (op Op) String() string {
 		return fmt.Sprintf("BLOCK %v", op.Index)
 	case RAW_DATA:
 		return fmt.Sprintf("RAW_DATA %v bytes", len(op.Data))
-    case EOF:
+	case EOF:
 		return fmt.Sprintf("EOF sha1=%v", hex.EncodeToString(op.Data))
 	default:
 		return fmt.Sprintf("Invalid OpCode %v", op.OpCode)
@@ -57,52 +59,101 @@ type Signature map[uint32]map[[md5.Size]byte]int
 
 // NewSignature creates the Signature of the data.
 func NewSignature(data io.Reader) (Signature, error) {
-	weakHash := newWeakChecksum()
-	aBlockSizeSlice := make([]byte, BlockSize)
+	sigWriter := NewSignatureWriter()
+	_, err := io.Copy(sigWriter, data)
+	if err != nil {
+		return nil, err
+	}
 
-	sig := make(map[uint32]map[[md5.Size]byte]int)
-	var currentIndex int
-	for {
-		n, err := readFullAndCopyN(weakHash, data, aBlockSizeSlice)
-		if err != nil && err != io.EOF {
-			return nil, err
+	return sigWriter.Signature(), nil
+}
+
+type SignatureWriter struct {
+	rollingWeakHash *weakChecksum
+	md5Hash         hash.Hash
+	multiwriter     io.Writer
+	sig             Signature
+	n               int
+	currentIndex    int
+}
+
+func NewSignatureWriter() *SignatureWriter {
+	rollingWeakHash := newWeakChecksum()
+	md5Writer := md5.New()
+	return &SignatureWriter{
+		rollingWeakHash: rollingWeakHash,
+		md5Hash:         md5Writer,
+		multiwriter:     io.MultiWriter(rollingWeakHash, md5Writer),
+		sig:             make(map[uint32]map[[md5.Size]byte]int),
+		n:               0,
+		currentIndex:    0,
+	}
+}
+
+func (w *SignatureWriter) Write(buf []byte) (int, error) {
+	remaining := BlockSize - w.n
+	if len(buf) < remaining {
+		n, err := w.multiwriter.Write(buf)
+		w.n += n
+		return n, err
+	} else {
+		n, err := w.multiwriter.Write(buf[0:remaining])
+		w.n += n
+		if err != nil {
+			return n, err
 		}
 
-		weak := weakHash.Sum32()
-        strong := md5.Sum(aBlockSizeSlice[0:n])
-		m, ok := sig[weak]
+		weak := w.rollingWeakHash.Sum32()
+		var strong [md5.Size]byte
+		w.md5Hash.Sum(strong[0:0:md5.Size])
+		m, ok := w.sig[weak]
 		if !ok {
 			m = make(map[[md5.Size]byte]int)
-			sig[weak] = m
+			w.sig[weak] = m
 		}
 		_, ok2 := m[strong]
 		if !ok2 {
-			m[strong] = currentIndex
+			m[strong] = w.currentIndex
 		}
 
-		//sig = append(sig, bc)
-		//strongHash.Reset()
-		weakHash.Reset()
+		w.rollingWeakHash.Reset()
+		w.md5Hash.Reset()
+		w.n = 0
+		w.currentIndex++
 
-		if err == io.EOF {
-			break
-		}
-		currentIndex++
+		secondWriteN, err := w.Write(buf[remaining:])
+		return n + secondWriteN, err
 	}
+}
 
-	return sig, nil
+func (w *SignatureWriter) Signature() Signature {
+	if w.n != 0 {
+		weak := w.rollingWeakHash.Sum32()
+		var strong [md5.Size]byte
+		w.md5Hash.Sum(strong[0:0:md5.Size])
+		m, ok := w.sig[weak]
+		if !ok {
+			m = make(map[[md5.Size]byte]int)
+			w.sig[weak] = m
+		}
+		_, ok2 := m[strong]
+		if !ok2 {
+			m[strong] = w.currentIndex
+		}
+	}
+	return w.sig
 }
 
 // Delta returns a chan with the operations required to update the old data to be equal the new data. It closes the rsync.Op channel when it's done. If the newData Reader returns an error, the error is sent through the error channel before the rsync.Op channel is closed. See Patch.
-func Delta(oldDataSignature Signature, newData io.Reader) (chan Op, chan error) {
+func Delta(oldDataSignature Signature, newData io.Reader) (<-chan Op, <-chan error) {
 	errc := make(chan error, 1)
-	resultChan := make(chan Op, 20)
+	resultChan := make(chan Op, deltaFuncBuffer)
 
 	go func() {
 		defer close(resultChan)
 
 		rollingWeakHash := newWeakChecksum()
-        sha1Writer := sha1.New()
+		sha1Writer := sha1.New()
 		dataBeingProcessed := bytes.NewBuffer(make([]byte, 0, BlockSize))
 		multiwriter := io.MultiWriter(dataBeingProcessed, rollingWeakHash, sha1Writer)
 		aByteSlice := make([]byte, 1)
@@ -197,11 +248,11 @@ func Delta(oldDataSignature Signature, newData io.Reader) (chan Op, chan error) 
 			resultChan <- newDataRsyncOp
 		}
 		//send EOF op
-        EOFOp := Op{
-            OpCode: EOF,
-            Data:   sha1Writer.Sum(nil),
-        }
-        resultChan <- EOFOp
+		EOFOp := Op{
+			OpCode: EOF,
+			Data:   sha1Writer.Sum(nil),
+		}
+		resultChan <- EOFOp
 
 		errc <- nil
 	}()
@@ -211,12 +262,12 @@ func Delta(oldDataSignature Signature, newData io.Reader) (chan Op, chan error) 
 
 // Patch applies the operations from opsChan with oldData and writes resulting data to newData. It also makes sure that the resulting data sha1 hash matches the original data sha1 hash, returning an error otherwise. In case of error, the newData Writer may have incomplete data. See Delta.
 func Patch(oldData io.ReaderAt, opsChan <-chan Op, errc <-chan error, newData io.Writer) error {
-    sha1Writer := sha1.New()
-    multiwriter := io.MultiWriter(newData, sha1Writer)
+	sha1Writer := sha1.New()
+	multiwriter := io.MultiWriter(newData, sha1Writer)
 
 	buf := make([]byte, BlockSize)
 	for op := range opsChan {
-        //log.Println(op)
+		//log.Println(op)
 		switch op.OpCode {
 		case BLOCK:
 			n, err := oldData.ReadAt(buf, int64(op.Index*BlockSize))
@@ -235,10 +286,10 @@ func Patch(oldData io.ReaderAt, opsChan <-chan Op, errc <-chan error, newData io
 				return err
 			}
 		case EOF:
-            h := sha1Writer.Sum(nil)
-            if bytes.Compare(h, op.Data) != 0 {
-                return fmt.Errorf("rsync: hash of data created does not match hash of original data")
-            }
+			h := sha1Writer.Sum(nil)
+			if bytes.Compare(h, op.Data) != 0 {
+				return fmt.Errorf("rsync: hash of data created does not match hash of original data")
+			}
 		}
 	}
 	if err := <-errc; err != nil {
@@ -266,7 +317,7 @@ func readFullAndCopyN(dst io.Writer, src io.Reader, buf []byte) (written int64, 
 			}
 		}
 		if er == io.EOF {
-            err = io.EOF
+			err = io.EOF
 			break
 		}
 		if er != nil {

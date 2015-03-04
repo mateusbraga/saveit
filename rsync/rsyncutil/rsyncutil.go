@@ -103,7 +103,7 @@ func DeltaChanToArray(opc <-chan rsync.Op, errc <-chan error) ([]rsync.Op, error
 	return result, nil
 }
 
-func DeltaArrayToChan(ops []rsync.Op) (chan rsync.Op, chan error) {
+func DeltaArrayToChan(ops []rsync.Op) (<-chan rsync.Op, <-chan error) {
 	opc := make(chan rsync.Op)
     closedErrChan := make(chan error)
     close(closedErrChan)
